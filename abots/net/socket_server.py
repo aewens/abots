@@ -1,12 +1,16 @@
+from abots.net.socket_server_handler import SocketServerHandler
+
 from threading import Thread
 from struct import pack, unpack
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
+from multiprocessing import Process, Queue, JoinableQueue
 
-class SocketServer(Thread):
+class SocketServer(Process):
     def __init__(self, host, port, listeners=5, buffer_size=4096,       
-        max_message_size=26214400, end_of_line="\r\n", handler=None):
-        Thread.__init__(self)
+        max_message_size=26214400, end_of_line="\r\n", inbox=JoinableQueue(),
+        outbox=Queue(), handler=None):
+        Process.__init__(self)
 
         self.host = host
         self.port = port
@@ -14,7 +18,9 @@ class SocketServer(Thread):
         self.buffer_size = buffer_size
         self.max_message_size = max_message_size
         self.end_of_line = end_of_line
-        self.handler = self._handler if handler is None else handler
+        self.inbox = inbox
+        self.outbox = outbox
+        self.handler = SocketServerHandler if handler is None else handler
         self.sock = socket(AF_INET, SOCK_STREAM)
         self.sock_fd = -1
         self.lookup = list()
@@ -22,53 +28,9 @@ class SocketServer(Thread):
         self.clients = dict()
         self.running = True
 
-    def _handler(self, sock, message):
-        print("RAW", message)
-        if message == "STOP":
-            self.broadcast(self.sock, "STOP")
-            self.stop()
-            return -1
-        if message == "QUIT":
-            client_fd = self.get_client_fd(sock)
-            if client_fd is None:
-                return 0
-            client_address = [a for fd, a in self.lookup if fd == client_fd][0]
-            client_name = "{}:{}".format(*client_address)
-            self.broadcast(self.sock, "LEAVE {}".format(client_name))
-            self._close_sock(sock)
-            return 1
-        elif message == "LIST":
-            fds = list() #list(map(str, self.clients.keys()))
-            client_fd = self.get_client_fd(sock)
-            for fd in self.clients.keys():
-                if fd == self.sock_fd:
-                    fds.append("*{}".format(fd))
-                elif fd == client_fd:
-                    fds.append("+{}".format(fd))
-                else:
-                    fds.append(str(fd))
-            self.send(sock, ",".join(fds))
-            return 1
-        elif message[:5] == "SEND ":
-            params = message[5:].split(" ", 1)
-            if len(params) < 2:
-                return 0
-            fd, response = params
-            client_sock = self.clients.get(int(fd), dict()).get("sock", None)
-            if client_sock is None:
-                return 0
-            self.send(client_sock, response)
-            return 1
-        elif message[:6] == "BCAST ":
-            response = message[6:]
-            self.broadcast(sock, response)
-            return 1
-        else:
-            return 2
-
     def _close_sock(self, sock):
         self.sockets.remove(sock)
-        fd = self.get_client_fd(sock)
+        fd = self._get_client_fd(sock)
         if fd is not None:
             del self.clients[fd]
         sock.close()
@@ -115,7 +77,7 @@ class SocketServer(Thread):
         message_size = unpack(">I", raw_message_size)[0]
         return message_size
 
-    def get(self, sock):
+    def _get_message(self, sock):
         message_size = self._get_message_size(sock)
         if message_size is None:
             return None
@@ -127,7 +89,7 @@ class SocketServer(Thread):
             self._close_sock(sock)
             return None
 
-    def send(self, sock, message, *args):
+    def _send_message(self, sock, message, *args):
         packaged = self._package_message(message, *args)
         try:
             sock.send(packaged)
@@ -136,7 +98,14 @@ class SocketServer(Thread):
         except OSError:
             self._close_sock(sock)
 
-    def get_client_fd(self, client_sock):
+    def _broadcast_message(self, client_sock, client_message, *args):
+        for sock in self.sockets:
+            not_server = sock != self.sock
+            not_client = sock != client_sock
+            if not_server and not_client:
+                self._send_message(sock, client_message, *args)
+
+    def _get_client_fd(self, client_sock):
         try:
             return client_sock.fileno()
         except OSError:
@@ -146,12 +115,25 @@ class SocketServer(Thread):
                 return fd
             return None
 
-    def broadcast(self, client_sock, client_message, *args):
-        for sock in self.sockets:
-            not_server = sock != self.sock
-            not_client = sock != client_sock
-            if not_server and not_client:
-                self.send(sock, client_message, *args)
+    def _process_inbox(self):
+        while not self.inbox.empty():
+            data = self.inbox.get()
+            mode = data[0]
+            if mode == "SEND":
+                client, message, args = data[1:]
+                self._send_message(message, *args)
+            elif mode == "BCAST":
+                message, args = data[1:]
+                self._broadcast_message(self.sock, message, *args)
+            self.inbox.task_done()
+
+    def _client_thread(self, sock):
+        while self.running:
+            message = self._get_message(sock)
+            if message is None:
+                continue
+            status = self.handler(self, sock, message)
+            self.outbox.put((status, message))
 
     def _prepare(self):
         self.sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
@@ -171,44 +153,57 @@ class SocketServer(Thread):
         self.clients[self.sock_fd]["sock"] = self.sock
         return None
 
-    def start(self):
+    def send(self, client, message, *args):
+        self.inbox.put(("SEND", client, message, args))
+
+    def broadcast(self, message, *args):
+        self.inbox.put(("BCAST", message, args))
+
+    def results(self):
+        messages = list()
+        while not self.outbox.empty():
+            messages.append(self.outbox.get())
+        return messages
+
+    def run(self):
         err = self._prepare()
         if err is not None:
             print(err)
             return err
         print("Server ready!")
         while self.running:
+            # try:
+            #     selection = select(self.sockets, list(), list(), 5)
+            #     read_socks, write_socks, err_socks = selection
+            # except OSError as e:
+            #     print("Error", e)
+            #     continue
+            # for sock in read_socks:
+            #     if sock == self.sock:
             try:
-                selection = select(self.sockets, list(), list(), 5)
-                read_socks, write_socks, err_socks = selection
-            except OSError as e:
-                print("Error", e)
+                client_sock, client_address = self.sock.accept()
+                client_sock.settimeout(60)
+            except OSError:
                 continue
-            for sock in read_socks:
-                if sock == self.sock:
-                    try:
-                        client_sock, client_address = self.sock.accept()
-                        client_sock.settimeout(60)
-                    except OSError:
-                        continue
-                    client_name = "{}:{}".format(*client_address)
-                    client_host, client_port = client_address
-                    client_fd = client_sock.fileno()
-                    self.lookup.append((client_fd, client_sock))
-                    self.sockets.append(client_sock)
-                    self.clients[client_fd] = dict()
-                    self.clients[client_fd]["host"] = client_host
-                    self.clients[client_fd]["port"] = client_port
-                    self.clients[client_fd]["sock"] = client_sock
-                    joined = "ENTER {}".format(client_name)
-                    print(joined)
-                    self.broadcast(client_sock, joined)
-                else:
-                    message = self.get(sock)
-                    if message is None:
-                        continue
-                    status = self.handler(sock, message)
-                    print(status, message)
+            client_name = "{}:{}".format(*client_address)
+            client_host, client_port = client_address
+            client_fd = client_sock.fileno()
+            self.lookup.append((client_fd, client_sock))
+            self.sockets.append(client_sock)
+            self.clients[client_fd] = dict()
+            self.clients[client_fd]["host"] = client_host
+            self.clients[client_fd]["port"] = client_port
+            self.clients[client_fd]["sock"] = client_sock
+            joined = "ENTER {}".format(client_name)
+            self.outbox.put((1, joined))
+            self._broadcast_message(client_sock, joined)
+            Thread(target=self._client_thread, args=(client_sock,)).start()
+            #     else:
+            #         message = self._get_message(sock)
+            #         if message is None:
+            #             continue
+            #         status = self.handler(self, sock, message)
+            #         self.outbox.put((status, message))
 
     def stop(self):
         self.running = False

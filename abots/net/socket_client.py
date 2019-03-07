@@ -1,5 +1,5 @@
 from struct import pack, unpack
-from multiprocessing import Process, JoinableQueue, Queue
+from multiprocessing import Process, Queue, JoinableQueue
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 
 class SocketClient(Process):
@@ -70,11 +70,11 @@ class SocketClient(Process):
         except OSError:
             self.stop()
 
-    def _gather_messages(self):
-        data = self._get_message()
-        if data is None:
-            return None
-        self.outbox.put(self.handler(data))
+    def _process_inbox(self):
+        while not self.inbox.empty():
+            message, args = self.inbox.get()
+            self._send_message(message, *args)
+            self.inbox.task_done()
 
     def _prepare(self):
         self.sock.setblocking(False)
@@ -101,14 +101,10 @@ class SocketClient(Process):
             return err
         print("Ready!")
         while self.running:
-            self._gather_messages()
-            while not self.inbox.empty():
-                message, args = self.inbox.get()
-                self._send_message(message, *args)
-                self.inbox.task_done()
-                self._gather_messages()
-            # response = input("> ")
-            # self._send_message(response)
+            data = self._get_message()
+            if data is not None:
+                self.outbox.put(self.handler(data))
+            self._process_inbox()
 
     def stop(self):
         self.running = False

@@ -1,22 +1,34 @@
-* net
-    * socket_server
-        * Add comments
-        * Abstract default handler out to another file
-        * Send heartbeat
-        * Better handle clients disconnecting
-        * Remove lookup, use clients instead
-        * Add alias system for clients to replace using fd
-        * Add support for cryptography
-    * socket_client
-        * Add comments
-        * Abstract default handler out to another file
-        * Respond to heartbeat
-        * Respond to alias from server
-        * Add support for cryptography
+## net
 
-* Add crypto set
-* In crypto add GPG, Diffie-Hellman, and symmetric & asymmetric crypto
-* Add helpers set
-* In helpers add JSON encoding / decoding
-* Add db set
-* In db add sqlite wrappers
+### socket_server
+
+- [ ] Add comments
+- [ ] Abstract default handler out to another file
+- [ ] Send heartbeat
+- [ ] Better handle clients disconnecting
+- [ ] Remove lookup, use clients instead
+- [ ] Add alias system for clients to replace using fd
+- [ ] Add support for cryptography
+
+### socket_client
+
+- [ ] Add comments
+- [ ] Abstract default handler out to another file
+- [ ] Respond to heartbeat
+- [ ] Respond to alias from server
+- [ ] Add support for cryptography
+
+## crypto
+
+- [ ] Add crypto set
+- [ ] In crypto add GPG, Diffie-Hellman, and symmetric & asymmetric crypto
+
+## helpers
+
+- [ ] Add helpers set
+- [ ] In helpers add JSON encoding / decoding
+
+## db
+
+- [ ] Add db set
+- [ ] In db add sqlite wrappers
