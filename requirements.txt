@@ -1,3 +1,5 @@
 pytest
 python-gnupg
 cryptography
+flask
+websockets

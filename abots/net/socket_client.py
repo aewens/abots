@@ -1,22 +1,39 @@
+from abots.net.socket_client_handler import SocketClientHandler as handler
+
 from struct import pack, unpack
 from multiprocessing import Process, Queue, JoinableQueue
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
+from ssl import wrap_socket
+
+"""
+
+Socket Client
+=============
+
+
+
+"""
 
 class SocketClient(Process):
     def __init__(self, host, port, buffer_size=4096, end_of_line="\r\n", 
-        inbox=JoinableQueue(), outbox=Queue(), handler=lambda x: x):
+        secure=False, inbox=JoinableQueue(), outbox=Queue(), handler=handler,
+        **kwargs):
         Process.__init__(self)
 
         self.host = host
         self.port = port
         self.buffer_size = buffer_size
         self.end_of_line = end_of_line
-        self.handler = handler
-        self.sock = socket(AF_INET, SOCK_STREAM)
-        self.connection = (self.host, self.port)
-        self.running = True
+        self.secure = secure
         self.inbox = inbox
         self.outbox = outbox
+        self.handler = handler(self)
+        self.sock = socket(AF_INET, SOCK_STREAM)
+        if self.secure:
+            self.sock = wrap_socket(self.sock, **kwargs)
+
+        self.connection = (self.host, self.port)
+        self.running = True
         self.error = None
 
     def _recv_bytes(self, get_bytes, decode=True):
@@ -99,7 +116,7 @@ class SocketClient(Process):
         if err is not None:
             print(err)
             return err
-        print("Ready!")
+        # print("Ready!")
         while self.running:
             data = self._get_message()
             if data is not None:
