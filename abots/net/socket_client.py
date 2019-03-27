@@ -1,10 +1,3 @@
-from abots.net.socket_client_handler import SocketClientHandler as handler
-
-from struct import pack, unpack
-from multiprocessing import Process, Queue, JoinableQueue
-from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
-from ssl import wrap_socket
-
 """
 
 Socket Client
@@ -14,11 +7,18 @@ Socket Client
 
 """
 
+from abots.net.socket_client_handler import SocketClientHandler as handler
+
+from struct import pack, unpack
+from multiprocessing import Process, Queue, JoinableQueue
+from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
+from ssl import wrap_socket
+
 class SocketClient(Process):
     def __init__(self, host, port, buffer_size=4096, end_of_line="\r\n", 
         secure=False, inbox=JoinableQueue(), outbox=Queue(), handler=handler,
         **kwargs):
-        Process.__init__(self)
+        super().__init__(self)
 
         self.host = host
         self.port = port

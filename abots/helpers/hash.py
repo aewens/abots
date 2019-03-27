@@ -1,0 +1,42 @@
+from os import urandom
+from binascii import hexlify
+from hashlib import algorithms_available, pbkdf2_hmac, script, new as new_hash
+
+def create_hash(algorithm, seed=None, random_bytes=32, use_bin=False):
+    if algorithm not in algorithms_available:
+        return None
+    h = new_hash(algorithm)
+    if seed is None:
+        h.update(urandom(random_bytes))
+    else:
+        h.update(seed.encode("utf-8"))
+    
+    if use_bin:
+        return h.digest()
+    return h.hexdigest()
+
+def md5(*args, **kwargs):
+    create_hash("md5", *args, **kwargs)
+
+def sha1(*args, **kwargs):
+    create_hash("sha1", *args, **kwargs)
+
+def sha256(*args, **kwargs):
+    create_hash("sha256", *args, **kwargs)
+
+def sha512(*args, **kwargs):
+    create_hash("sha512", *args, **kwargs)
+
+def pbkdf2(algo, pswd, salt=None, cycles=100000, key_len=None, use_bin=False):
+    if algorithm not in algorithms_available:
+        return None
+    if type(pswd) is str:
+        pswd = pswd.encode("utf-8")
+    if salt is None:
+        salt = os.urandom(16)
+    elif type(salt) is str:
+        salt = salt.encode("utf-8")
+    derived_key = pbkdf2_hmac(algo, pswd, salt, cycles, key_len)
+    if use_bin:
+        return derived_key
+    return hexlify(derived_key).decode("utf-8")

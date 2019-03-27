@@ -1,13 +1,3 @@
-from abots.net.socket_server_handler import SocketServerHandler as handler
-
-from threading import Thread
-from struct import pack, unpack
-from select import select
-from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
-from multiprocessing import Process, Queue, JoinableQueue
-from time import time
-from ssl import wrap_socket
-
 """
 
 net\SocketServer
@@ -20,14 +10,24 @@ functions to send/receive messages from the server.
 
 """
 
+from abots.net.socket_server_handler import SocketServerHandler as handler
+
+from threading import Thread
+from struct import pack, unpack
+from select import select
+from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
+from multiprocessing import Process, Queue, JoinableQueue
+from time import time
+from ssl import wrap_socket
+
 # Inherits Process so that server can be run as a daemon
 class SocketServer(Process):
     # There are many parameters here, but that is so that any constant used can 
     # be easily tweaked and not remain hard-coded without an easy way to change 
     def __init__(self, host, port, listeners=5, buffer_size=4096, secure=False, 
-        max_message_size=-1, end_of_line="\r\n", heartbeat=60, 
+        timeout=0.02, max_message_size=-1, end_of_line="\r\n", heartbeat=60, 
         inbox=JoinableQueue(), outbox=Queue(), handler=handler, **kwargs):
-        Process.__init__(self)
+        super().__init__(self)
 
         # The connection information for server, the clients will use this to 
         # connect to the server
@@ -40,6 +40,9 @@ class SocketServer(Process):
 
         # Size of buffer pulled by `receive_bytes` when not specified
         self.buffer_size = buffer_size
+
+        # Timeout for the socket server, in term of seconds
+        self.timeout = timeout
 
         # If max_message_size is -1, it allows any message size
         self.max_message_size = max_message_size
@@ -145,6 +148,7 @@ class SocketServer(Process):
         except (BrokenPipeError, OSError) as e:
             # This usually means that the port is already in use
             return e
+        self.sock.settimeout(self.timeout)
         self.sock.listen(self.listeners)
 
         # Gets the file descriptor of the socket, which is a fallback for a 
