@@ -7,60 +7,59 @@ Socket Client
 
 """
 
-from abots.net.socket_client_handler import SocketClientHandler as handler
+from abots.helpers import eprint, noop
 
 from struct import pack, unpack
-from multiprocessing import Process, Queue, JoinableQueue
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from ssl import wrap_socket
+from traceback import print_exc
 
-class SocketClient(Process):
-    def __init__(self, host, port, buffer_size=4096, end_of_line="\r\n", 
-        secure=False, inbox=JoinableQueue(), outbox=Queue(), handler=handler,
-        **kwargs):
-        super().__init__(self)
-
+class SocketClient():
+    def __init__(self, host, port, handler, buffer_size=4096, secure=False, 
+        *args, **kwargs):
         self.host = host
         self.port = port
         self.buffer_size = buffer_size
-        self.end_of_line = end_of_line
         self.secure = secure
-        self.inbox = inbox
-        self.outbox = outbox
-        self.handler = handler(self)
+        self.handler = handler(self, *args, **kwargs)
         self.sock = socket(AF_INET, SOCK_STREAM)
         if self.secure:
             self.sock = wrap_socket(self.sock, **kwargs)
 
         self.connection = (self.host, self.port)
         self.running = True
-        self.error = None
+        self.pid = None
+        self.kill_switch = None
+        self.mailbox = None
 
     def _recv_bytes(self, get_bytes, decode=True):
         data = "".encode()
-        eol = self.end_of_line.encode()
+        attempts = 0
         while len(data) < get_bytes:
+            # Automatically break loop to prevent infinite loop
+            # Allow at least twice the needed iterations to occur exiting loop
+            if attempts > 2 * (get_bytes / self.buffer_size):
+                break
+            else:
+                attempts = attempts + 1
             bufsize = get_bytes - len(data)
+
+            # Force bufsize to cap out at buffer_size
             if bufsize > self.buffer_size:
                 bufsize = self.buffer_size
             try:
                 packet = self.sock.recv(bufsize)
-            except OSError:
+            # The socket can either be broken or no longer open at all
+            except (BrokenPipeError, OSError) as e:
                 return None
-            length = len(data) + len(packet)
-            checker = packet if length < get_bytes else packet[:-2]
-            if eol in checker:
-                packet = packet.split(eol)[0] + eol
-                return data + packet
             data = data + packet
         return data.decode() if decode else data
 
     def _package_message(self, message, *args):
-        formatted = None
         if len(args) > 0:
-            formatted = message.format(*args) + self.end_of_line
+            formatted = message.format(*args)
         else:
-            formatted = message + self.end_of_line
+            formatted = message
         packaged = pack(">I", len(formatted)) + formatted.encode()
         return packaged
 
@@ -76,22 +75,16 @@ class SocketClient(Process):
         if message_size is None:
             return None
         try:
-            return self._recv_bytes(message_size).strip(self.end_of_line)
+            return self._recv_bytes(message_size)
         except OSError:
             return None
 
-    def _send_message(self, message, *args):
+    def send_message(self, message, *args):
         packaged = self._package_message(message, *args)
         try:
             self.sock.send(packaged)
         except OSError:
             self.stop()
-
-    def _process_inbox(self):
-        while not self.inbox.empty():
-            message, args = self.inbox.get()
-            self._send_message(message, *args)
-            self.inbox.task_done()
 
     def _prepare(self):
         self.sock.setblocking(False)
@@ -102,28 +95,39 @@ class SocketClient(Process):
             return e
         return None
 
-    def send(self, message, *args):
-        self.inbox.put((message, args))
+    def from_actor(self, pid, event, queue):
+        self.pid = pid
+        self.kill_switch = event
+        self.mailbox = queue
 
-    def results(self):
-        messages = list()
-        while not self.outbox.empty():
-            messages.append(self.outbox.get())
-        return messages
-
-    def run(self):
+    def start(self):
         err = self._prepare()
         if err is not None:
-            print(err)
+            eprint(err)
             return err
-        # print("Ready!")
+        print("Ready!")
+        self.handler.initialize()
         while self.running:
-            data = self._get_message()
-            if data is not None:
-                self.outbox.put(self.handler(data))
-            self._process_inbox()
+            if self.call(self.kill_switch, "is_set"):
+                self.stop()
+                break
+            message = self._get_message()
+            if message is None:
+                continue
+            self.handler.message(message)
 
-    def stop(self):
+    def call(self, source, method, *args, **kwargs):
+        source_method = getattr(source, method, noop)
+        try:
+            return source_method(*args, **kwargs)
+        except Exception:
+            status = print_exc()
+            eprint(status)
+            return status
+
+    def stop(self, done=None):
+        print("Stopping client!")
         self.running = False
         self.sock.close()
-        self.terminate()
+        self.call(done, "set")
+        print("Stopped client!")

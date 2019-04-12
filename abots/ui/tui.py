@@ -1,6 +1,6 @@
 """
 
-ui\TUI: Text User Interface
+ui/TUI: Text User Interface
 ===========================
 
 The curses library is one of those things I always wanted to use, but never got 

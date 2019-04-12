@@ -1,6 +1,7 @@
 from json import dumps, loads
 from codecs import encode as c_encode, decode as c_decode
 from base64 import b64encode, b64decode
+from re import compile as regex
 
 # JSON encoder, converts a python object to a string
 def jots(data, readable=False):

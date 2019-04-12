@@ -1,5 +1,7 @@
 # Application-specific
 scratch
+*.bak.py
+archive/
 
 # ---> Python
 # Byte-compiled / optimized / DLL files
