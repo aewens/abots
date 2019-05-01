@@ -1,23 +1,22 @@
 from time import monotonic, sleep
-from multiprocessing import Event, Process
+from threading import Event, Thread
 
 class Every:
     def __init__(self, interval, function, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
         self.interval = interval
         self.function = function
-        self.condition = Event()
+        self.event = Event()
 
-    def _wrapper(self):
+    def _wrapper(self, *args, **kwargs):
         start = monotonic()
-        while not self.condition.is_set():
-            self.function(*self.args, **self.kwargs)
+        while not self.event.is_set():
+            self.function(*args, **kwargs)
             sleep(self.interval - ((monotonic() - start) % self.interval))
 
     def start(self):
-        proc = Process(target=self._wrapper)
-        proc.start()
+        thread = Thread(target=self._wrapper, args=args, kwargs=kwargs)
+        thread.setDaemon(True)
+        thread.start()
 
     def stop(self):
-        self.condition.set()
+        self.event.set()

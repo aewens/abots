@@ -1,7 +1,6 @@
-from abots.helpers import eprint, noop
+from abots.helpers import eprint, cast
 
 from multiprocessing import Process, Event, Queue
-from traceback import print_exc
 from enum import Enum
 
 class MailCode(Enum):
@@ -153,7 +152,7 @@ class Actor(Process):
             self.mailbox = queue
             self.valid = True
 
-    def call(self, source, method, *args, **kwargs):
+    def _call(self, source, method, *args, **kwargs):
         source_method = getattr(source, method, noop)
         try:
             return source_method(*args, **kwargs)
@@ -163,22 +162,27 @@ class Actor(Process):
             return status
 
     def run(self):
-        print(f"Starting {self.name}")
+        # print(f"Starting {self.name}")
         if not self.valid:
             return None
-        print(f"[{self.name}]: Starting proc")
-        self.proc.from_actor(self.pid, self.kill_switch, self.mailbox)
+        # print(f"[{self.name}]: Starting proc")
+        exports = dict()
+        exports["pid"] = self.pid
+        exports["kill_switch"] = self.kill_switch
+        exports["mailbox"] = self.mailbox
+        exports["ledger"] = self.ledger
+        cast(self.proc, "from_actor", exports)
         proc = Process(target=self.proc.start)
         proc.start()
         actions = ["reply", "deliver", "send", "send_to", "send_faux"]
-        print(f"[{self.name}]: Started proc")
+        # print(f"[{self.name}]: Started proc")
         self.kill_switch.wait()
         # while not self.kill_switch.is_set():
         #     while not self.mailbox.empty():
         #         envelope = Envelope(self.own_pid, self.mailbox.get())
         #         if not envelope.valid:
         #             continue
-        #         response = self.call(self.proc, "handle", envelope.message)
+        #         response = cast(self.proc, "handle", envelope.message)
         #         if response is None or len(response) != 3:
         #             continue
         #         action, args, kwargs = response
@@ -188,19 +192,19 @@ class Actor(Process):
         #             continue
         #         elif action == "deliver" and not envelope.can_deliver:
         #             continue
-        #         self.call(envelope, action, *args, **kwargs)
+        #         cast(envelope, action, *args, **kwargs)
         self.stop()
 
     def stop(self, done=None, timeout=None):
-        print(f"Stopping {self.name}")
+        # print(f"Stopping {self.name}")
         delay = Event()
-        self.call(self.proc, "stop", delay)
+        cast(self.proc, "stop", delay)
         delay.wait(timeout)
         self.kill_switch.set()
         self.mailbox.close()
         self.mailbox.join_thread()
-        self.call(done, "set")
-        print(f"Stopped {self.name}")
+        cast(done, "set")
+        # print(f"Stopped {self.name}")
 
 class Supervisor:
     def __init__(self, name="__ROOT__", ledger=Ledger()):
@@ -226,7 +230,7 @@ class Supervisor:
         return actor
 
     def dismiss(self, child, done=None):
-        print(f"Dismissing {child}")
+        # print(f"Dismissing {child}")
         if type(child) != int:
             child = self.ledger.get_pid(child)
         if child not in self.children:
@@ -238,8 +242,8 @@ class Supervisor:
         event.set()
         queue.close()
         queue.join_thread()
-        self.call(done, "set")
-        print(f"Dismissed {child}")
+        cast(done, "set")
+        # print(f"Dismissed {child}")
 
     def stop(self, done=None):
         for child in self.children:
@@ -251,4 +255,4 @@ class Supervisor:
         event.set()
         queue.close()
         queue.join_thread()
-        self.call(done, "set")
+        cast(done, "set")

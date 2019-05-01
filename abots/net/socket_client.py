@@ -7,12 +7,11 @@ Socket Client
 
 """
 
-from abots.helpers import eprint, noop
+from abots.helpers import eprint, cast
 
 from struct import pack, unpack
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from ssl import wrap_socket
-from traceback import print_exc
 
 class SocketClient():
     def __init__(self, host, port, handler, buffer_size=4096, secure=False, 
@@ -28,9 +27,6 @@ class SocketClient():
 
         self.connection = (self.host, self.port)
         self.running = True
-        self.pid = None
-        self.kill_switch = None
-        self.mailbox = None
 
     def _recv_bytes(self, get_bytes, decode=True):
         data = "".encode()
@@ -95,39 +91,28 @@ class SocketClient():
             return e
         return None
 
-    def from_actor(self, pid, event, queue):
-        self.pid = pid
-        self.kill_switch = event
-        self.mailbox = queue
+    def from_actor(self, imports):
+        cast(self.handler, "load", imports)
 
     def start(self):
         err = self._prepare()
         if err is not None:
             eprint(err)
             return err
-        print("Ready!")
-        self.handler.initialize()
+        # print("Ready!")
+        cast(self.handler, "initialize")
         while self.running:
-            if self.call(self.kill_switch, "is_set"):
-                self.stop()
-                break
+            cast(self.handler, "pre_process")
             message = self._get_message()
             if message is None:
                 continue
-            self.handler.message(message)
+            cast(self.handler, "message", message)
 
-    def call(self, source, method, *args, **kwargs):
-        source_method = getattr(source, method, noop)
-        try:
-            return source_method(*args, **kwargs)
-        except Exception:
-            status = print_exc()
-            eprint(status)
-            return status
+            cast(self.handler, "post_process")
 
     def stop(self, done=None):
-        print("Stopping client!")
+        # print("Stopping client!")
         self.running = False
         self.sock.close()
-        self.call(done, "set")
-        print("Stopped client!")
+        cast(done, "set")
+        # print("Stopped client!")

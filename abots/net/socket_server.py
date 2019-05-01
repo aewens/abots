@@ -6,15 +6,15 @@ net/SocketServer
 
 """
 
-from abots.helpers import eprint, noop
+from abots.events import Envelope
+from abots.helpers import eprint, cast
 
-from threading import Thread
+from threading import Thread, Event
 from struct import pack, unpack
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from time import time
 from ssl import wrap_socket
-from traceback import print_exc
 
 class SocketServer:
     def __init__(self, host, port, handler, listeners=5, buffer_size=4096, 
@@ -48,25 +48,37 @@ class SocketServer:
         self.clients = list()
 
         # State variable for if the server is running or not. See `run`.
-        self.running = True
-        self.pid = None
-        self.kill_switch = None
-        self.mailbox = None
+        self.kill_switch = Event()
+        self.imports = dict()
+
+    def _new_client(self, sock, address):
+        sock.settimeout(60)
+        client_host, client_port = address
+        self.sockets.append(sock)
+
+        # Have handler process new client event
+        cast(self.handler, "open_client", client_host, client_port)
+
+        # Spawn new thread for client
+        event = self.kill_switch
+        client_thread = Thread(target=self._client_thread, args=(sock, event))
+        self.clients.append(client_thread)
+        client_thread.start()
 
     # Logic for the client socket running in its own thread
-    def _client_thread(self, sock):
-        while self.running:
+    def _client_thread(self, sock, kill_switch):
+        while not kill_switch.is_set():
             try:
                 message = self.get_message(sock)
             # The socket can either be broken or no longer open at all
             except (BrokenPipeError, OSError) as e:
-                self.handler.close_client(sock)
+                cast(self.handler, "close_client", sock)
                 break
             if message is None:
                 continue
             # Each message returns a status code, exactly which code is 
             # determined by the handler
-            self.handler.message(sock, message)
+            cast(self.handler, "message", sock, message)
         self.close_sock(sock)
         return
 
@@ -128,7 +140,7 @@ class SocketServer:
 
     # Packages a message and sends it to socket
     def send_message(self, sock, message, *args):
-        formatted = self.handler.format(message, *args)
+        formatted = cast(self.handler, "format", message, *args)
         try:
             sock.send(formatted)
         # The socket can either be broken or no longer open at all
@@ -143,10 +155,8 @@ class SocketServer:
             if not_server and not_client:
                 self.send_message(sock, client_message, *args)
 
-    def from_actor(self, pid, event, queue):
-        self.pid = None
-        self.kill_switch = event
-        self.mailbox = queue
+    def from_actor(self, imports):
+        cast(self.handler, "load", imports)
 
     # The Process function for running the socket server logic loop
     def start(self):
@@ -154,53 +164,29 @@ class SocketServer:
         if err is not None:
             eprint(err)
             return err
-        print("Server ready!")
-        while self.running:
-            if self.call(self.kill_switch, "is_set"):
-                self.stop()
+        # print("Server ready!")
+        while not self.kill_switch.is_set():
+            broken = cast(self.handler, "pre_process")
+            if broken:
                 break
             try:
                 # Accept new socket client
                 client_sock, client_address = self.sock.accept()
-                client_sock.settimeout(60)
+                self._new_client(client_sock, client_address)
             # The socket can either be broken or no longer open at all
             except (BrokenPipeError, OSError) as e:
                 continue
-
-            # Collect the metadata of the client socket
-            client_host, client_port = client_address
-
-            # Define metadata for client
-            self.sockets.append(client_sock)
-
-            # Have handler process new client event
-            self.handler.open_client(client_host, client_port)
-
-            # Spawn new thread for client
-            args = (client_sock,)
-            client_thread = Thread(target=self._client_thread, args=args)
-            self.clients.append(client_thread)
-            client_thread.start()
-
-    def call(self, source, method, *args, **kwargs):
-        source_method = getattr(source, method, noop)
-        try:
-            return source_method(*args, **kwargs)
-        except Exception:
-            status = print_exc()
-            eprint(status)
-            return status
+            # cast(self.handler, "post_process")
 
     # Stop the socket server
-    def stop(self, done=None):
-        print("Stopping server!")
-        self.handler.close()
+    def stop(self, done=None, join=False):
+        cast(self.handler, "close")
         for sock in self.sockets:
             if sock != self.sock:
                 sock.close()
-        self.running = False
+        self.kill_switch.set()
         self.sock.close()
-        for client in self.clients:
-            client.join()
-        self.call(done, "set")
-        print("Stopped server!")
+        if join:
+            for client in self.clients:
+                client.join()
+        cast(done, "set")

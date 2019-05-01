@@ -1,7 +1,11 @@
 # Application-specific
+tags
 scratch
+scratch.py
 *.bak.py
+*.db
 archive/
+.vscode/
 
 # ---> Python
 # Byte-compiled / optimized / DLL files
