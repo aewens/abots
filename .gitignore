@@ -3,6 +3,7 @@ TODO
 tags
 scratch
 scratch.py
+*.swp
 *.bak.py
 *.db
 archive/

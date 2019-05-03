@@ -5,6 +5,8 @@ class Every:
     def __init__(self, interval, function, *args, **kwargs):
         self.interval = interval
         self.function = function
+        self.args = args
+        self.kwargs = kwargs
         self.event = Event()
 
     def _wrapper(self, *args, **kwargs):
@@ -14,6 +16,8 @@ class Every:
             sleep(self.interval - ((monotonic() - start) % self.interval))
 
     def start(self):
+        args = self.args
+        kwargs = self.kwargs
         thread = Thread(target=self._wrapper, args=args, kwargs=kwargs)
         thread.setDaemon(True)
         thread.start()

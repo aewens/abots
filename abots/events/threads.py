@@ -29,10 +29,16 @@ class ThreadPool:
             self.workers.append(worker)
             worker.start()
 
+    def _exec_controls(self, controls):
+        for action, methods in controls.items():
+            for method in methods:
+                cast(method, action)
+
     def _worker(self, worker_id, event, queue, timeout=None):
         while not event.is_set():
             try:
-                # print(f"[{self.tid}]: Getting task")
+                # NOTE: This is really spammy, use only in case of emergencies
+                # print(f"[worker:{worker_id}]: Getting task")
                 if timeout is not None:
                     job = queue.get(block=True, timeout=timeout)
                 else:
@@ -41,33 +47,27 @@ class ThreadPool:
                     # print(f"[worker:{worker_id}]: Job is malformed")
                     continue
                 controls, task = job
-                if len(controls) != 3:
+                if type(controls) != dict:
                     # print(f"[worker:{worker_id}]: Controls are malformed")
                     continue
-                done, semaphore, lock = controls
                 if task is None: # NOTE: Poison pill to kill worker
                     # print(f"[worker:{worker_id}]: Poisoned")
                     event.set()
-                    done.set()
-                    lock.release()
-                    semaphore.release()
+                    self._exec_controls(controls)
                     break
                 if len(task) != 3:
                     # print(f"[worker:{worker_id}]: Task is malformed")
-                    done.set()
-                    lock.release()
-                    semaphore.release()
+                    self._exec_controls(controls)
                     continue
                 method, args, kwargs = task
-                # print(f"[{self.tid}]: Running task")
+                # print(f"[worker:{worker_id}]: Running task")
                 try:
                     method(*args, **kwargs)
                 except Exception as e:
                     print(e)
                 finally:
-                    done.set()
-                    lock.release()
-                    semaphore.release()
+                    # print(f"[worker:{worker_id}]: Task complete")
+                    self._exec_controls(controls)
                     queue.task_done()
             except Empty:
                 continue
@@ -91,47 +91,71 @@ class ThreadPool:
         # print(f"Stopped pool")
 
 class ThreadPoolManager:
-    def __init__(self, pool_size, cleanup=-1, timeout=None):
+    def __init__(self, pool_size, monitor=1, cleanup=True, timeout=None):
         self.pool_size = pool_size
-        self.timeout = timeout
+        self.monitor_interval = monitor
         self.cleanup = cleanup
-        self.pool_cursor = 0
-        self.worker_cursor = 0
+        self.timeout = timeout
+        self.stopped = Event()
+        self._manager = Lock() # NOTE: Maybe make this an RLock?
+        self._load_presets()
+        self._add_pool()
+
+        if self.monitor_interval > 0:
+            self.monitor = Every(self.monitor_interval, self._monitor)
+            self.monitor.start()
+
+    def _next_pool(self):
+        self._pool_cursor = (self._pool_cursor + 1) % len(self.pools)
+
+    def _next_worker(self):
+        self._worker_cursor = (self._worker_cursor + 1) % self.pool_size
+        # NOTE: This is a potential optimization for later
+        # if self._worker_cursor == 0:
+        #     self._next_pool()
+
+    def _load_presets(self):
+        self._pool_cursor = 0
+        self._worker_cursor = 0
         self.pools = list()
         self.locks = list()
         self.events = list()
         self.queues = list()
         self.workers = list()
         self.semaphores = list()
-        self._manager = Lock() # NOTE: Maybe make this an RLock?
-        self.stopped = Event()
-        self._add_pool()
-        if self.cleanup > 0:
-            self.cleaner = Every(self.cleanup, self._cleaner)
 
-    def _next_pool(self):
-        self.pool_cursor = (self.pool_cursor + 1) % len(self.pools)
+    def _get_idle_pools(self):
+        idle_pools = list()
+        if len(self.pools) == 1:
+            return idle_pools
+        for index, queues in enumerate(self.queues):
+            if index == 0:
+                continue
+            queues_empty = [queue.empty() for queue in queues]
+            idle = all(queues_empty)
+            if not idle:
+                continue
+            print(f"[manager] Pool {index} is idle")
+            idle_pools.append(self.pools[index])
+        return idle_pools
 
-    def _next_worker(self):
-        self.worker_cursor = (self.worker_cursor + 1) % self.pool_size
-        # NOTE: This is a potential optimization for later
-        # if self.worker_cursor == 0:
-        #     self._next_pool()
-
-    def _cleaner(self):
-        if len(self.pools) == 0 or self._manager.locked():
+    def _monitor(self):
+        # print("[manager] Cleaning pools")
+        if self._manager.locked():
             return # Try again later
         with self._manager:
-            pools = list()
-            for pool_index in range(1, len(self.pools) - 1):
-                pool = self.pools[pool_index]
-                queues = self.queues[pool_index]
-                idle = any([queue.empty() for queue in queues])
-                if not idle:
-                    continue
-                pools.append(pool)
-            for pool in pools:
-                self._stop_pool(pool)
+            idle_pools = self._get_idle_pools()
+            if self.cleanup and len(idle_pools) > 0:
+                cleaning = Event()
+                self._cleaner(idle_pools, cleaning)
+                cleaning.wait()
+
+    def _cleaner(self, idle_pools, done=None):
+        print("[manager] Cleaning pools")
+        for pool in idle_pools:
+            self._stop_pool(pool, wait=done is not None)
+        print("[manager] Pools are cleaned")
+        cast(done, "set")
 
     def _stop_pool(self, pool, done=None, wait=True):
         index = self.pools.index(pool)
@@ -166,6 +190,12 @@ class ThreadPoolManager:
         with self._manager:
             self._add_pool()
 
+    def clean(self, done=None):
+        with self._manager:
+            idle_pools = self._get_idle_pools()
+            if self.cleanup and len(idle_pools) > 0:
+                self._cleaner(idle_pools, done)
+
     def wait(self):
         # print("[manager] Waiting on workers in pools")
         with self._manager:
@@ -175,8 +205,8 @@ class ThreadPoolManager:
     
     def stop(self, wait=True):
         # print("[manager] Stopping")
-        if self.cleanup > 0:
-            self.cleaner.event.set()
+        if self.monitor_interval > 0:
+            self.monitor.event.set()
         with self._manager:
             dones = list()
             threads = list()
@@ -190,20 +220,60 @@ class ThreadPoolManager:
             if wait:
                 for thread in threads:
                     thread.join(self.timeout)
+            self._load_presets()
             cast(self.stopped, "set")
         # print("[manager] Stopped")
 
+    def _run(self, task, controls, reserve, coordinates):
+        pool_index, worker_index = coordinates
+        # print(f"[manager:reserve] Trying worker {self.worker_index}")
+        lock = self.locks[pool_index][worker_index]
+        event =self.events[pool_index][worker_index]
+        queue =self.queues[pool_index][worker_index]
+        if event.is_set() or lock.locked():
+            return False
+        if not reserve:
+            lock = Lock()
+        # print(f"[manager:reserve] Using worker {worker_index}")
+        lock.acquire()
+        release = controls.get("release", list())
+        release.append(lock)
+        job = controls, task
+        queue.put_nowait(job)
+        return True
+
+    def run(self, task, done, reserve, coordinates):
+        if len(task) != 3:
+            return None
+        if len(coordinates) != 2:
+            return None
+        method, args, kwargs = task
+        if not callable(method) or type(args) != tuple or type(kwargs) != dict:
+            return None
+        pool_index, worker_index = coordinates
+        if pool_index >= len(self.pools) or worker_index >= self.pool_size:
+            return None
+        with self.manager:
+            semaphore = self.semaphores[pool_index]
+            if not semaphore.acquire(False):
+                return None
+            controls = dict()
+            controls["set"] = [done]
+            controls["release"] = [sempahore]
+            self._run(task, controls, reserve, coordinates)
+        return True
+
     def reserve(self, method, args=tuple(), kwargs=dict(), reserve=True):
-        done = Event()
         # print("[manager:reserve] Acquiring lock")
+        done = Event()
         with self._manager:
             task = method, args, kwargs
-            if self.pool_cursor >= len(self.pools):
+            if self._pool_cursor >= len(self.pools):
                 self._next_pool()
             pool_found = False
             for p in range(len(self.pools)):
-                # print(f"[manager:reserve] Trying pool {self.pool_cursor}")
-                semaphore = self.semaphores[self.pool_cursor]
+                # print(f"[manager:reserve] Trying pool {self._pool_cursor}")
+                semaphore = self.semaphores[self._pool_cursor]
                 if not semaphore.acquire(False):
                     self._next_pool()
                     continue
@@ -212,27 +282,20 @@ class ThreadPoolManager:
             if not pool_found:
                 # print(f"[manager:reserve] Pools are full, adding new pool")
                 index = self._add_pool()
-                self.pool_cursor = index
-                self.worker_cursor = 0
-                semaphore = self.semaphores[self.pool_cursor]
+                self._pool_cursor = index
+                self._worker_cursor = 0
+                semaphore = self.semaphores[self._pool_cursor]
                 semaphore.acquire()
-            # print(f"[manager:reserve] Using pool {self.pool_cursor}")
-            pool = self.pools[self.pool_cursor]
+            # print(f"[manager:reserve] Using pool {self._pool_cursor}")
+            pool = self.pools[self._pool_cursor]
             for w in range(self.pool_size):
-                # print(f"[manager:reserve] Trying worker {self.worker_cursor}")
-                lock = self.locks[self.pool_cursor][self.worker_cursor]
-                event =self.events[self.pool_cursor][self.worker_cursor]
-                queue =self.queues[self.pool_cursor][self.worker_cursor]
-                if event.is_set() or lock.locked():
-                    self._next_worker()
-                    continue
-                if not reserve:
-                    lock = Lock()
-                # print(f"[manager:reserve] Using worker {self.worker_cursor}")
-                lock.acquire()
-                controls = done, semaphore, lock
-                job = controls, task
-                queue.put_nowait(job)
+                coordinates = (self._pool_cursor, self._worker_cursor)
+                controls = dict()
+                controls["set"] = [done]
+                controls["release"] = [semaphore]
+                queued = self._run(task, controls, reserve, coordinates)
                 self._next_worker()
+                if not queued:
+                    continue
                 break
         return done

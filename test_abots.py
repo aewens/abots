@@ -4,7 +4,8 @@ from abots.helpers import jsto
 from abots.events import ThreadPoolManager
 
 from urllib.request import urlopen
-from time import monotonic
+from threading import Event
+from time import monotonic, sleep
 
 def urlread(url):
     with urlopen(url) as u:
@@ -20,76 +21,50 @@ def get_hn_story(item, score_threshold):
 
 def gen_hn(score_threshold):
     hn_start = monotonic()
-    # print("Gathering new stories")
+    print("Gathering new stories")
     hn_new_stories = "https://hacker-news.firebaseio.com/v0/topstories.json"
     items = jsto(urlread(hn_new_stories))
     # stories = dict()
+    print(f"Gathered {len(items)} stories")
     for i, item in enumerate(items):
         # print(f"[{i}] Processing story '{item}'")
         get_hn_story(item, score_threshold)
     elapsed = monotonic() - hn_start
-    # print("Done processing")
+    print("Done processing")
     return elapsed
 
-def gen_hn_threaded(score_threshold):
+def gen_hn_threaded(score_threshold, manager):
     hn_start = monotonic()
-    # print("Gathering new stories")
+    print("Gathering new stories")
     hn_new_stories = "https://hacker-news.firebaseio.com/v0/topstories.json"
     items = jsto(urlread(hn_new_stories))
-    # stories = dict()
+    tasks = list()
+    print(f"Gathered {len(items)} stories")
     for i, item in enumerate(items):
         # print(f"[{i}] Processing story '{item}'")
-        Thread(target=get_hn_story, args=(item, score_threshold)).start()
-    elapsed = monotonic() - hn_start
-    # print("Done processing")
-    return elapsed
-
-# score_threshold = 300
-# print("Starting normal")
-# elapsed1 = gen_hn(score_threshold)
-# print("Starting threaded")
-# elapsed2 = gen_hn_threaded(score_threshold)
-# print(f"First: {elapsed1:0.2f}s\tSecond: {elapsed2:0.2f}s")
-
-# Awful on purpose
-def fib(n):
-    if n <= 1:
-        return 1
-    return fib(n - 1) + fib(n - 2)
-
-def normal(n, size):
-    fib_start = monotonic()
-    for s in range(size):
-        fib(n)
-    elapsed = monotonic() - fib_start
-    return elapsed
-
-def threaded(n, size, manager):
-    fib_start = monotonic()
-    tasks = list()
-    while len(tasks) < size:
-        args = (n,)
-        task = manager.reserve(fib, args)
+        task = manager.reserve(get_hn_story, (item, score_threshold))
         tasks.append(task)
     for task in tasks:
         task.wait()
-    elapsed = monotonic() - fib_start
+    elapsed = monotonic() - hn_start
+    print("Done processing")
     return elapsed
 
 print("Loading manager")
-test_size = 24
-pool_size = int(test_size / 2)
+pool_size = 12
+test_size = pool_size * 3
 pre_start = monotonic()
 manager = ThreadPoolManager(pool_size)
 loading = monotonic() - pre_start
 print(f"Loading: {loading:0.2f}s")
 
-n = 25
+score_threshold = 300
 print("Starting normal")
-normal_time = normal(n, test_size)
+normal_time = gen_hn(score_threshold)
+print(f"Normal: {normal_time:0.2f}s")
 print("Starting threaded")
-threaded_time = threaded(n, test_size, manager)
-print(f"Normal: {normal_time:0.2f}s\tThreaded: {threaded_time:0.2f}s")
+threaded_time = gen_hn_threaded(score_threshold, manager)
+print(f"Threaded: {threaded_time:0.2f}s")
 
 print("Stopping manager")
 post_start = monotonic()
