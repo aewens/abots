@@ -6,6 +6,7 @@ scratch.py
 *.swp
 *.bak.py
 *.db
+*.log
 archive/
 .vscode/
 
