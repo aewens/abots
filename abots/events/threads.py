@@ -6,7 +6,6 @@ from threading import Thread, Event, Lock, RLock, BoundedSemaphore
 
 """
 TODO:
-- Add routine clean-up in ThreadPoolManager of un-used thread pools
 """
 
 class ThreadPool:
@@ -90,12 +89,14 @@ class ThreadPool:
         cast(done, "set")
         # print(f"Stopped pool")
 
-class ThreadPoolManager:
-    def __init__(self, pool_size, monitor=1, cleanup=True, timeout=None):
+class ThreadMarshal:
+    def __init__(self, pool_size, monitor=1, cleanup=True, timeout=None, 
+        destroy=False):
         self.pool_size = pool_size
         self.monitor_interval = monitor
         self.cleanup = cleanup
         self.timeout = timeout
+        self.destroy = destroy
         self.stopped = Event()
         self._manager = Lock() # NOTE: Maybe make this an RLock?
         self._load_presets()
@@ -139,16 +140,19 @@ class ThreadPoolManager:
             idle_pools.append(self.pools[index])
         return idle_pools
 
-    def _monitor(self):
+    def _monitor(self, state):
         # print("[manager] Cleaning pools")
         if self._manager.locked():
             return # Try again later
         with self._manager:
             idle_pools = self._get_idle_pools()
-            if self.cleanup and len(idle_pools) > 0:
+            if self.destroy and len(idle_pools) == len(self.pools):
+                self.stop()
+            elif self.cleanup and len(idle_pools) > 0:
                 cleaning = Event()
                 self._cleaner(idle_pools, cleaning)
                 cleaning.wait()
+        return None
 
     def _cleaner(self, idle_pools, done=None):
         print("[manager] Cleaning pools")
@@ -173,6 +177,24 @@ class ThreadPoolManager:
         self.semaphores.remove(semaphore)
         pool.stop(done, wait)
         # print(f"[manager] Stopped pool {index}")
+
+    def _run(self, task, controls, reserve, coordinates):
+        pool_index, worker_index = coordinates
+        # print(f"[manager:reserve] Trying worker {self.worker_index}")
+        lock = self.locks[pool_index][worker_index]
+        event =self.events[pool_index][worker_index]
+        queue =self.queues[pool_index][worker_index]
+        if event.is_set() or lock.locked():
+            return False
+        if not reserve:
+            lock = Lock()
+        # print(f"[manager:reserve] Using worker {worker_index}")
+        lock.acquire()
+        release = controls.get("release", list())
+        release.append(lock)
+        job = controls, task
+        queue.put_nowait(job)
+        return True
 
     def _add_pool(self):
         index = len(self.pools)
@@ -223,24 +245,6 @@ class ThreadPoolManager:
             self._load_presets()
             cast(self.stopped, "set")
         # print("[manager] Stopped")
-
-    def _run(self, task, controls, reserve, coordinates):
-        pool_index, worker_index = coordinates
-        # print(f"[manager:reserve] Trying worker {self.worker_index}")
-        lock = self.locks[pool_index][worker_index]
-        event =self.events[pool_index][worker_index]
-        queue =self.queues[pool_index][worker_index]
-        if event.is_set() or lock.locked():
-            return False
-        if not reserve:
-            lock = Lock()
-        # print(f"[manager:reserve] Using worker {worker_index}")
-        lock.acquire()
-        release = controls.get("release", list())
-        release.append(lock)
-        job = controls, task
-        queue.put_nowait(job)
-        return True
 
     def run(self, task, done, reserve, coordinates):
         if len(task) != 3:

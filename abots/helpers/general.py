@@ -1,11 +1,15 @@
 from sys import stderr
 from traceback import print_exc
+from datetime import datetime, timezone
 
 def eprint(*args, **kwargs):
     print(*args, file=stderr, **kwargs)
 
 def noop(*args, **kwargs):
     pass
+
+def obtain(source, attribute):
+    return getattr(source, attribute, None)
 
 def cast(source, method, *args, **kwargs):
     source_method = getattr(source, method, noop)
@@ -23,3 +27,9 @@ def deduce(reference, attributes):
 
 def get_digit(number, position):
     return False if number - 10**position < 0 else number // 10*position % 10
+
+def utc_now():
+    return datetime.utcnow().replace(tzinfo=timezone.utc)
+
+def utc_now_timestamp():
+    return utc_now().timestamp()

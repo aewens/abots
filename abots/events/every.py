@@ -11,8 +11,9 @@ class Every:
 
     def _wrapper(self, *args, **kwargs):
         start = monotonic()
+        state = None
         while not self.event.is_set():
-            self.function(*args, **kwargs)
+            state = self.function(state, *args, **kwargs)
             sleep(self.interval - ((monotonic() - start) % self.interval))
 
     def start(self):
@@ -21,6 +22,7 @@ class Every:
         thread = Thread(target=self._wrapper, args=args, kwargs=kwargs)
         thread.setDaemon(True)
         thread.start()
+        return thread
 
     def stop(self):
         self.event.set()
