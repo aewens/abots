@@ -21,8 +21,9 @@ from queue import Queue, Empty
 
 class SocketServer(Thread):
     def __init__(self, host, port, listeners=5, buffer_size=4096, 
-        secure=False, timeout=None):
+        secure=False, timeout=None, daemon=False):
         super().__init__()
+        self.setDaemon(daemon)
 
         # The connection information for server, the clients will use this to 
         # connect to the server
@@ -74,9 +75,7 @@ class SocketServer(Thread):
         client_host, client_port = address
         self.sockets.append(sock)
 
-        # Spawn new thread for client
         client_kill = Event()
-        
         client_uuid = sha256()
         self.uuids[client_uuid] = dict()
         self.uuids[client_uuid]["sock"] = sock
@@ -109,8 +108,17 @@ class SocketServer(Thread):
             # Send message and uuid of sender to outbox queue
             letter = uuid, message
             self._outbox.put(letter)
-        self.close_sock(uuid)
-        return
+
+    def _queue_thread(self, inbox, timeout):
+        while not self.kill_switch.is_set():
+            for letter in self._obtain(inbox, timeout):
+                if len(letter) != 2:
+                    continue
+                uuid, message = letter
+                if uuid == "cast":
+                    self.broadcast_message(uuid, message)
+                else:
+                    self.send_message(uuid, message)
 
     def _obtain(self, queue, timeout=False):
         if timeout is False:
@@ -124,17 +132,6 @@ class SocketServer(Thread):
                 queue.task_done()
             except Empty:
                 break
-
-    def _queue_thread(self, inbox, timeout):
-        while not self.kill_switch.is_set():
-            for letter in self._obtain(inbox, timeout):
-                if len(letter) != 2:
-                    continue
-                uuid, message = letter
-                if uuid == "cast":
-                    self.broadcast_message(uuid, message)
-                else:
-                    self.send_message(uuid, message)
 
     # Prepares socket server before starting it
     def _prepare(self):
@@ -248,12 +245,13 @@ class SocketServer(Thread):
             return err
         queue_args = self._inbox, self.timeout
         Thread(target=self._queue_thread, args=queue_args).start()
-        print("Server ready!")
+        # print("Server ready!")
         self.ready.set()
         while not self.kill_switch.is_set():
             try:
                 # Accept new socket client
                 client_sock, client_address = self.sock.accept()
+                # print(client_address)
                 self._new_client(client_sock, client_address)
             # The socket can either be broken or no longer open at all
             except (BrokenPipeError, OSError) as e:
