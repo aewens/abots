@@ -7,26 +7,72 @@ Socket Client
 
 """
 
-from abots.helpers import eprint, cast
+from abots.helpers import eprint, cast, jots, jsto, utc_now_timestamp
 
 from struct import pack, unpack
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from ssl import wrap_socket
+from threading import Thread, Event
+from queue import Queue, Empty
 
-class SocketClient():
-    def __init__(self, host, port, handler, buffer_size=4096, secure=False, 
-        *args, **kwargs):
+class SocketClient(Thread):
+    def __init__(self, host, port, buffer_size=4096, secure=False, 
+        timeout=None):
+        super().__init__()
+
         self.host = host
         self.port = port
         self.buffer_size = buffer_size
         self.secure = secure
-        self.handler = handler(self, *args, **kwargs)
+        self.timeout = timeout
         self.sock = socket(AF_INET, SOCK_STREAM)
         if self.secure:
             self.sock = wrap_socket(self.sock, **kwargs)
 
         self.connection = (self.host, self.port)
         self.running = True
+
+        self.kill_switch = Event()
+        self.ready = Event()
+        self.stopped = Event()
+
+        self._inbox = Queue()
+        self._events = Queue()
+        self._outbox = Queue()
+        self.queues = dict()
+        self.queues["inbox"] = self._inbox
+        self.queues["outbox"] = self._outbox
+        self.queues["events"] = self._events
+
+    def _send_event(self, message):
+        self._events.put(jots(message))
+    
+    def _prepare(self):
+        self.sock.setblocking(False)
+        self.sock.settimeout(1)
+        try:
+            self.sock.connect(self.connection)
+        except OSError as e:
+            return e
+        return None
+    
+    def _obtain(self, queue, timeout=False):
+        if timeout is False:
+            timeout = self.timeout
+        while True:
+            try:
+                if timeout is not None:
+                    yield queue.get(timeout=timeout)
+                else:
+                    yield queue.get_nowait()
+                queue.task_done()
+            except Empty:
+                break
+
+    def _queue_thread(self, inbox, timeout):
+        while not self.kill_switch.is_set():
+            for message in self._obtain(inbox, timeout):
+                self.send_message(message)
 
     def _recv_bytes(self, get_bytes, decode=True):
         data = "".encode()
@@ -82,37 +128,37 @@ class SocketClient():
         except OSError:
             self.stop()
 
-    def _prepare(self):
-        self.sock.setblocking(False)
-        self.sock.settimeout(1)
-        try:
-            self.sock.connect(self.connection)
-        except OSError as e:
-            return e
-        return None
+    def recv(self):
+        return [letter for letter in self._obtain(self._outbox)]
 
-    def from_actor(self, imports):
-        cast(self.handler, "load", imports)
+    def send(self, message):
+        self._inbox.put(message)
 
-    def start(self):
+    def run(self):
         err = self._prepare()
         if err is not None:
             eprint(err)
             return err
-        # print("Ready!")
-        cast(self.handler, "initialize")
+        queue_args = self._inbox, self.timeout
+        Thread(target=self._queue_thread, args=queue_args).start()
+        print("Client ready!")
+        self.ready.set()
         while self.running:
-            cast(self.handler, "pre_process")
             message = self._get_message()
             if message is None:
                 continue
-            cast(self.handler, "message", message)
-
-            cast(self.handler, "post_process")
+            self._outbox.put(message)
 
     def stop(self, done=None):
         # print("Stopping client!")
+        event = dict()
+        event["name"] = "closing"
+        event["data"] = dict()
+        event["data"]["when"] = utc_now_timestamp()
+        self._send_event(event)
+        self.kill_switch.set()
         self.running = False
         self.sock.close()
+        self.stopped.set()
         cast(done, "set")
         # print("Stopped client!")

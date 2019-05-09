@@ -3,22 +3,26 @@
 net/SocketServer
 ================
 
+TODO:
+* Add logging to broken pipe exceptions
 
 """
 
-from abots.events import Envelope
-from abots.helpers import eprint, cast
+from abots.helpers import eprint, cast, sha256, utc_now_timestamp
+from abots.helpers import jsto, jots
 
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 from struct import pack, unpack
 from select import select
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from time import time
 from ssl import wrap_socket
+from queue import Queue, Empty
 
-class SocketServer:
-    def __init__(self, host, port, handler, listeners=5, buffer_size=4096, 
-        secure=False, *args, **kwargs):
+class SocketServer(Thread):
+    def __init__(self, host, port, listeners=5, buffer_size=4096, 
+        secure=False, timeout=None):
+        super().__init__()
 
         # The connection information for server, the clients will use this to 
         # connect to the server
@@ -35,7 +39,16 @@ class SocketServer:
         # Determines if SSL wrapper is used
         self.secure = secure
 
-        self.handler = handler(self, *args, **kwargs)
+        # Timeout set on queues
+        self.timeout = timeout
+
+        self._inbox = Queue()
+        self._events = Queue()
+        self._outbox = Queue()
+        self.queues = dict()
+        self.queues["inbox"] = self._inbox
+        self.queues["outbox"] = self._outbox
+        self.queues["events"] = self._events
 
         # Sets up the socket itself
         self.sock = socket(AF_INET, SOCK_STREAM)
@@ -46,41 +59,82 @@ class SocketServer:
         # List of all sockets involved (both client and server)
         self.sockets = list()
         self.clients = list()
+        self.uuids = dict()
 
         # State variable for if the server is running or not. See `run`.
         self.kill_switch = Event()
-        self.imports = dict()
+        self.ready = Event()
+        self.stopped = Event()
+
+    def _send_event(self, message):
+        self._events.put(jots(message))
 
     def _new_client(self, sock, address):
         sock.settimeout(60)
         client_host, client_port = address
         self.sockets.append(sock)
 
-        # Have handler process new client event
-        cast(self.handler, "open_client", client_host, client_port)
-
         # Spawn new thread for client
-        event = self.kill_switch
-        client_thread = Thread(target=self._client_thread, args=(sock, event))
+        client_kill = Event()
+        
+        client_uuid = sha256()
+        self.uuids[client_uuid] = dict()
+        self.uuids[client_uuid]["sock"] = sock
+        self.uuids[client_uuid]["kill"] = client_kill
+
+        event = dict()
+        event["name"] = "new_client"
+        event["data"] = dict()
+        event["data"]["host"] = client_host
+        event["data"]["port"] = client_port
+        event["data"]["uuid"] = client_uuid
+        self._send_event(event)
+
+        client_args = sock, client_kill, client_uuid
+        client_thread = Thread(target=self._client_thread, args=client_args)
         self.clients.append(client_thread)
         client_thread.start()
 
     # Logic for the client socket running in its own thread
-    def _client_thread(self, sock, kill_switch):
+    def _client_thread(self, sock, kill_switch, uuid):
         while not kill_switch.is_set():
             try:
-                message = self.get_message(sock)
+                message = self.get_message(uuid)
             # The socket can either be broken or no longer open at all
             except (BrokenPipeError, OSError) as e:
-                cast(self.handler, "close_client", sock)
+                eprint(e)
                 break
             if message is None:
                 continue
-            # Each message returns a status code, exactly which code is 
-            # determined by the handler
-            cast(self.handler, "message", sock, message)
-        self.close_sock(sock)
+            # Send message and uuid of sender to outbox queue
+            letter = uuid, message
+            self._outbox.put(letter)
+        self.close_sock(uuid)
         return
+
+    def _obtain(self, queue, timeout=False):
+        if timeout is False:
+            timeout = self.timeout
+        while True:
+            try:
+                if timeout is not None:
+                    yield queue.get(timeout=timeout)
+                else:
+                    yield queue.get_nowait()
+                queue.task_done()
+            except Empty:
+                break
+
+    def _queue_thread(self, inbox, timeout):
+        while not self.kill_switch.is_set():
+            for letter in self._obtain(inbox, timeout):
+                if len(letter) != 2:
+                    continue
+                uuid, message = letter
+                if uuid == "cast":
+                    self.broadcast_message(uuid, message)
+                else:
+                    self.send_message(uuid, message)
 
     # Prepares socket server before starting it
     def _prepare(self):
@@ -97,11 +151,31 @@ class SocketServer:
         self.sockets.append(self.sock)
         return None
 
+    def _sock_from_uuid(self, uuid):
+        return self.uuids.get(uuid, dict()).get("sock", None)
+
+    def _package_message(self, message, *args):
+        if len(args) > 0:
+            formatted = message.format(*args)
+        else:
+            formatted = message
+        packaged = pack(">I", len(formatted)) + formatted.encode()
+        return packaged
+
     # Closes a connected socket and removes it from the sockets list
-    def close_sock(self, sock):
-        if sock in self.sockets:
+    def close_sock(self, uuid):
+        event = dict()
+        event["name"] = "close_client"
+        event["data"] = dict()
+        event["data"]["uuid"] = uuid
+        self._send_event(event)
+        if uuid in list(self.uuids):
+            sock = self.uuids[uuid]["sock"]
+            kill = self.uuids[uuid]["kill"]
+            kill.set()
+            del self.uuids[uuid]
             self.sockets.remove(sock)
-        sock.close()
+            sock.close()
 
     # Receives specified number of bytes from a socket
     # sock - one of the sockets in sockets
@@ -130,45 +204,53 @@ class SocketServer:
             data = data + packet
         return data.decode() if decode else data
 
-     # Get message from socket
-    def get_message(self, sock):
+    # Get message from socket
+    def get_message(self, uuid):
+        sock = self._sock_from_uuid(uuid)
+        if sock is None:
+            return None
         raw_message_size = self.receive_bytes(sock, 4, False)
-        if raw_message_size is None:
+        if raw_message_size is None or len(raw_message_size) != 4:
             return None
         message_size = unpack(">I", raw_message_size)[0]
         return self.receive_bytes(sock, message_size)
 
     # Packages a message and sends it to socket
-    def send_message(self, sock, message, *args):
-        formatted = cast(self.handler, "format", message, *args)
+    def send_message(self, uuid, message, *args):
+        sock = self._sock_from_uuid(uuid)
+        if sock is None:
+            return None
+        formatted = self._package_message(message)
         try:
             sock.send(formatted)
         # The socket can either be broken or no longer open at all
         except (BrokenPipeError, OSError) as e:
-            self.close_sock(sock)
+            return
 
     # Like send_message, but sends to all sockets but the server and the sender
-    def broadcast_message(self, client_sock, client_message, *args):
-        for sock in self.sockets:
-            not_server = sock != self.sock
-            not_client = sock != client_sock
-            if not_server and not_client:
-                self.send_message(sock, client_message, *args)
+    def broadcast_message(self, client_uuid, message, *args):
+        for uuid in list(self.uuids):
+            if uuid != client_uuid:
+                self.send_message(uuid, message, *args)
 
-    def from_actor(self, imports):
-        cast(self.handler, "load", imports)
+    def recv(self):
+        return [letter for letter in self._obtain(self._outbox)]
 
-    # The Process function for running the socket server logic loop
-    def start(self):
+    def send(self, uuid, message):
+        letter = uuid, message
+        self._inbox.put(letter)
+
+    # The function for running the socket server logic loop
+    def run(self):
         err = self._prepare()
         if err is not None:
             eprint(err)
             return err
-        # print("Server ready!")
+        queue_args = self._inbox, self.timeout
+        Thread(target=self._queue_thread, args=queue_args).start()
+        print("Server ready!")
+        self.ready.set()
         while not self.kill_switch.is_set():
-            broken = cast(self.handler, "pre_process")
-            if broken:
-                break
             try:
                 # Accept new socket client
                 client_sock, client_address = self.sock.accept()
@@ -176,17 +258,20 @@ class SocketServer:
             # The socket can either be broken or no longer open at all
             except (BrokenPipeError, OSError) as e:
                 continue
-            # cast(self.handler, "post_process")
 
     # Stop the socket server
     def stop(self, done=None, join=False):
-        cast(self.handler, "close")
-        for sock in self.sockets:
-            if sock != self.sock:
-                sock.close()
+        event = dict()
+        event["name"] = "closing"
+        event["data"] = dict()
+        event["data"]["when"] = utc_now_timestamp()
+        self._send_event(event)
+        for uuid in list(self.uuids):
+            self.close_sock(uuid)
         self.kill_switch.set()
         self.sock.close()
         if join:
             for client in self.clients:
-                client.join()
+                client.join(self.timeout)
+        self.stopped.set()
         cast(done, "set")

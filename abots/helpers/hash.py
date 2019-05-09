@@ -12,22 +12,21 @@ def create_hash(algorithm, seed=None, random_bytes=32, use_bin=False):
         h.update(urandom(random_bytes))
     else:
         h.update(seed.encode("utf-8"))
-    
     if use_bin:
         return h.digest()
     return h.hexdigest()
 
 def md5(*args, **kwargs):
-    create_hash("md5", *args, **kwargs)
+    return create_hash("md5", *args, **kwargs)
 
 def sha1(*args, **kwargs):
-    create_hash("sha1", *args, **kwargs)
+    return create_hash("sha1", *args, **kwargs)
 
 def sha256(*args, **kwargs):
-    create_hash("sha256", *args, **kwargs)
+    return create_hash("sha256", *args, **kwargs)
 
 def sha512(*args, **kwargs):
-    create_hash("sha512", *args, **kwargs)
+    return create_hash("sha512", *args, **kwargs)
 
 def pbkdf2(algo, pswd, salt=None, cycles=100000, key_len=None, use_bin=False):
     if algorithm not in algorithms_available:

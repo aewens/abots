@@ -3,10 +3,20 @@ from abots.events import Every
 
 from queue import Queue, Empty, Full
 from threading import Thread, Event, Lock, RLock, BoundedSemaphore
+from contextlib import contextmanager
 
 """
 TODO:
 """
+
+@contextmanager
+def acquire_timeout(lock, timeout=-1):
+    if timeout is None:
+        timeout = -1
+    result = lock.acquire(timeout=timeout)
+    yield result
+    if result:
+        lock.release()
 
 class ThreadPool:
     def __init__(self, pool_size, timeout=None):

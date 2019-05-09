@@ -4,3 +4,4 @@ from abots.helpers.numbers import clamp, randfloat
 from abots.helpers.general import eprint, deduce, noop, cast, get_digit, obtain
 from abots.helpers.general import utc_now, utc_now_timestamp
 from abots.helpers.logging import Logger
+from abots.helpers.black_magic import infinitedict

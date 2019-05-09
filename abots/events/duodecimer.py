@@ -3,7 +3,7 @@ from abots.helpers import cast, utc_now
 
 from queue import Queue, Empty
 from collections import defaultdict
-from threading import Thread
+from threading import Thread, Event
 
 """
 
@@ -67,19 +67,27 @@ class Cron:
         return int(f"{when.hour:02}{when.minute:02}")
     
     @staticmethod
-    def get_weekday(when=utc_now()):
+    def get_weekday(when=None):
+        if when is None:
+            when = utc_now()
         return when.weekday()
     
     @staticmethod
-    def get_day(when=utc_now()):
+    def get_day(when=None):
+        if when is None:
+            when = utc_now()
         return when.day
     
     @staticmethod
-    def get_month(when=utc_now()):
+    def get_month(when=None):
+        if when is None:
+            when = utc_now()
         return when.month
     
     @staticmethod
-    def get_year(when=utc_now()):
+    def get_year(when=None):
+        if when is None:
+            when = utc_now()
         return when.year
 
     @staticmethod
@@ -100,8 +108,6 @@ class Cron:
         if hour >= 24:
             hour = hour % 24
         return int(f"{hour:02}{minute:02}")
-        
-
 
 class Duodecimer:
     def __init__(self):
@@ -137,11 +143,14 @@ class Duodecimer:
             state = list()
         while True:
             try:
-                task = queue.get_nowait()
-                if len(task) != task_size:
+                job = queue.get_nowait()
+                if len(job) != 2:
+                    continue
+                cancel, task = job
+                if cancel.is_set() or len(task) != task_size:
                     # print(f"[worker:{worker_id}]: Task is malformed")
                     continue
-                state.append(task)
+                state.append(job)
                 queue.task_done()
             except Empty:
                 break
@@ -157,9 +166,16 @@ class Duodecimer:
     def _timer(self, state, queue):
         state = self._process_queue(state, queue, 3)
         marshal = ThreadMarshal(len(state), destroy=True)
-        for task in state:
+        cancelled = list()
+        for job in state:
             # print(f"[worker:{worker_id}]: Running task")
+            cancel, task = job
+            if cancel.is_set():
+                cancelled.append(job)
+                continue
             marshal.reserve(*task)
+        for job in cancelled:
+            state.remove(job)
         return state
 
     def _cron(self, state, queue):
@@ -168,7 +184,11 @@ class Duodecimer:
         state["tasks"] = self._process_queue(state["tasks"], queue, 4)
         previous = state["previous"]
         removing = list()
-        for task in state["tasks"]:
+        for job in state["tasks"]:
+            cancel, task = job
+            if cancel.is_set():
+                removing.append(job)
+                continue
             cron, target, args, kwargs = task
             assert isinstance(cron.triggers, dict), "Expected dict"
             triggered = list()
@@ -204,16 +224,14 @@ class Duodecimer:
         if timer not in self.queues.keys():
             return None
         task = method, args, kwargs
-        self.queues[timer].put(task)
+        cancel = Event()
+        job = cancel, task
+        self.queues[timer].put(job)
+        return cancel
 
     def schedule(self, cron, target, args=tuple(), kwargs=dict()):
         task = cron, target, args, kwargs
-        self.queues["cron"].put(task)
-
-"""
-
-duodecimer = Duodecimer()
-task_id = duodecimer.every(10, "minutes", task)
-duodecimer.cancel(task_id)
-
-"""
+        cancel = Event()
+        job = cancel, task
+        self.queues["cron"].put(job)
+        return cancel
